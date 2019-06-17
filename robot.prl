@@ -1,0 +1,168 @@
+#!/usr/local/bin/perl -w
+
+use strict;
+use Carp;
+use HTML::LinkExtor;
+use HTTP::Request;
+use HTTP::Response;
+use HTTP::Status;
+use LWP::RobotUA;
+use URI::URL;
+use FileHandle;
+
+URI::URL::strict(1);
+
+$| = 1;
+
+my $ROBOT_NAME = 'ChengBot/1.0';
+my $ROBOT_MAIL = 'echeng6@jhu.edu';
+
+my $robot = new LWP::RobotUA $ROBOT_NAME, $ROBOT_MAIL;
+my $base_url = shift(@ARGV);
+
+my @search_urls = ();
+my %search_imgs = (); # image urls already grabbed
+my %urls        = (); # hash of URL keys to image link values
+my %relevance   = ();
+my %pushed      = ();
+
+push @search_urls, $base_url;
+
+my $domain = $base_url;
+my $index = index($base_url, "www.");
+if ($index != -1) { $domain = substr $base_url, $index; }
+$index = index($domain, "/");
+if ($index != -1) { $domain = substr $domain, 0, $index; }
+
+while (@search_urls) {
+    my $url = shift @search_urls;
+    my $parsed_url = eval { new URI::URL $url; };
+    next if $@;
+    next if $parsed_url->scheme !~ /http/i;
+
+    my $request  = new HTTP::Request HEAD => $url;
+    my $response = $robot->request($request);
+    if ($response->code != RC_OK) {
+        next;
+    }
+
+    next if !&wanted_content($response->content_type);
+
+    print "BASE $url\n";
+    $request->method( 'GET' );
+    $response = $robot->request( $request );
+
+    next if $response->code != RC_OK;
+
+    my @images = grab_images($response->content, $url);
+    if (@images > 0) {
+        foreach my $link (@images) {
+            my $full_img_url = eval { (new URI::URL $link, $response->base)->abs; };
+            if (!(exists $search_imgs{$full_img_url})) {
+                print "$full_img_url\n";
+                $search_imgs{$full_img_url} = 1;
+            }
+        }
+    }
+
+    my @related_urls = &grab_urls($response->content);
+    foreach my $link (@related_urls) {
+        my $full_url = eval { (new URI::URL $link, $response->base)->abs; };
+        # not in the domain
+        if (index($full_url, $domain) == -1) { next; }
+
+        delete $relevance{ $link } and next if $@;
+
+        $relevance{ $full_url } = $relevance{ $link };
+        delete $relevance{ $link } if $full_url ne $link;
+
+        push @search_urls, $full_url and $pushed{ $full_url } = 1
+            if ! exists $pushed{ $full_url };
+    
+    }
+}
+
+print "DONE\n";
+exit 0;
+
+sub wanted_content {
+    my $content = shift;
+    return $content =~ m@text/html@;
+}
+
+sub grab_images {
+    my $content  = shift;
+    my $base_url = shift;
+    my @images   = ( );
+
+    # extract all image links and put them into an array
+    while ($content =~ m/(<img\s+[^>]*src="([^"]*)"[^>]*>)/ig) {
+        my ($img_url) = $1 =~ m/.*"(.*?)"/;
+        push @images, $img_url;
+    }
+    return @images;
+}
+
+sub grab_urls {
+    my $content = shift;
+    my %urls    = ();    # NOTE: this is an associative array so that we only
+                         # push the same "href" value once.
+  skip:
+    while ($content =~ s/<\s*[aA] ([^>]*)>\s*(?:<[^>]*>)*(?:([^<]*)(?:<[^aA>]*>)*<\/\s*[aA]\s*>)?//) {
+        my $tag_text = $1;
+        my $reg_text = $2;
+        my $link     = undef;
+        my $link_rel = 1;
+        my $reg_rel  = 0;
+
+        if (defined $reg_text) {
+            $reg_text =~ s/[\n\r]/ /;
+            $reg_text =~ s/\s{2,}/ /;
+
+            #if reg_text even exists, increase relevance 
+            $reg_rel++;
+
+            # give all capitalized reg_text higher priority
+            if ($reg_text eq (uc $reg_text)) { $reg_rel++; }
+
+            # long reg_texts with lots of words are more "irrelevant", since they
+            # are oftentimes more specific and in this case relevant links are
+            # more general ones
+            my @words = split /\s+/, $reg_text;
+            if (@words > 0) { $reg_rel += (1 / @words); }
+        }
+
+        if ($tag_text =~ /href\s*=\s*(?:["']([^"']*)["']|([^\s])*)/i) {
+            $link = $1 || $2;
+
+             # make sure link is not self-referencing, non-local, or a mailto link
+            if (($link eq $base_url) or ($link =~ /^#/)) { next; }
+            if ((($link =~ /www\./) or ($link =~ /^http/)) &&
+                (index($link, $domain) == -1)) { next; }
+            if ($link =~ /mailto/i) { next; }
+
+            # if link = reg_text, loses reg_rel relevance
+            if (defined($reg_text) and index($link, $reg_text) > -1) { $reg_rel = 0; }
+            # get rid of end slash
+            if ($link =~ /\/$/ ) { $link = substr($link, 0, (length $link) - 1);}
+            my $temp = $link;
+
+            # link relevance based "how deep" the page is, i.e. 1 divided by how
+            # many slashes (/) are in the link plus 1 (so links with no
+            # slashes are the most relevant)
+            # ignore any double slashes, which are associated with
+            # http:// or https://
+
+            if ($link =~ /\/\//) { $temp = substr($temp, (index($temp, "//") + 2));}
+            # count number of slashes leftover
+            my $d = ($temp =~ tr/\///);
+            $link_rel /= ($d + 1);
+            
+            $relevance{ $link } += ($link_rel + $reg_rel);
+            $urls{ $link }       = 1;
+        } else { next; }
+        # ^ ignore empty(?) links, which I got sometimes
+    }
+    return keys %urls;   # the keys of the associative array hold all the
+                         # links we've found (no repeats).
+}

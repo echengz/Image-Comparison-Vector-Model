@@ -1,0 +1,595 @@
+#!usr/local/bin/perl -w
+
+# Emily Cheng echeng6@jhu.edu
+# 600.466 Information Retrieval Final Project
+# Image Comparison Robot
+
+use strict;
+use warnings;
+use FileHandle;
+use IO::Select;
+use Image::Magick;
+use Data::Dumper;
+use Try::Tiny;
+
+# Image::Magick handles
+my $org_img;
+my $cmp_img;
+
+# base URL images are being extracted from
+my $base_url; 
+
+# Array of image segments (Image::Magick handles)
+my @org_segments;
+my @cmp_segments;
+
+&main_loop();
+
+# Main menu
+sub main_loop {
+    while (1) {
+        print << "EndOfMenu";
+
+            ======================================================
+            ==     Welcome to the Image Comparison Web Robot    ==
+            ======================================================
+
+            Options:
+                1 = Find matches to an image on the web
+                2 = Use Image::Magick's to find matches to an image on the web
+                3 = Run similarity tests for a pair of images
+                4 = Run similarity tests for a pair of images using Image::Magick
+                0 = Quit
+EndOfMenu
+    ;
+
+        my $option = -1;
+        print "\nChoice: ";
+        while ($option !~ /^[0-4]$/) {
+            $option = <STDIN>;
+            chomp $option;
+            if ($option !~/^[0-4]$/) {
+                print "Invalid option, pick again.\n";
+            }
+        }
+        if    ($option == 0) { exit 0; }
+        elsif ($option == 3) { &pair_sim(); }
+        elsif ($option == 4) { &pair_sim_magick(); }
+        else                 { &call_robot($option); }
+    }
+}
+
+# Upload the image to compare, either from the Internet, the current
+# directory, or a specified path.
+sub upload_image {
+    my $choice = shift;
+    print << "EndOfMenu";
+    Upload an image from:
+        1 = a full image URL
+        2 = the current directory
+        3 = a specified path
+        0 = quit
+EndOfMenu
+    ;
+
+    my $option = -1;
+    print "\nChoice: ";
+    while ($option !~ /^[0-3]$/) {
+        $option = <STDIN>;
+        chomp $option;
+        if ($option !~/^[0-3]$/) {
+            print "Invalid option, pick again.\n";
+        }
+    }
+    if ($option == 0) { return 0; }
+    my $img_loc = '';
+    if ($option == 1) {
+        print "Please enter the (full) URL: ";
+    } elsif ($option == 2) {
+        print "Please enter the image filename (ex. filename.jpg): ";
+        $img_loc .= './';
+    } else {
+        print "Please enter the image's full path (ex. .../filename.jpg): ";
+    }
+    $img_loc .= <STDIN>;
+    chomp $img_loc;
+    my $img_hdl;
+    if (defined ($img_loc)) {
+        try {
+            $img_hdl = Image::Magick->new();
+            $img_hdl->Read($img_loc);
+        } catch {
+            print STDERR "Invalid image\n";
+            return 0;
+        };
+        if (defined ($img_hdl->Get('format'))) {
+            if ($choice == 1) {
+                $org_img = $img_hdl; 
+                my $ref = &segment($org_img);
+                @org_segments = @$ref;
+            }
+            else {
+                $cmp_img = $img_hdl;
+                my $ref = &segment($cmp_img);
+                @cmp_segments = @$ref;
+            }
+            return 1;
+        }
+    }
+    print STDERR "Invalid image\n";
+    return 0;
+}
+
+# Calls the robot.prl program to traverse the web
+sub call_robot {
+    my $option = shift;
+    if (&upload_image(1) == 0) { return; }
+    print "Do you want to begin at the default site,",
+          " http://www.cs.jhu.edu/~jkloss/? (y/n): ";
+    my $op = <STDIN>;
+    my $website;
+    if ($op =~ /^[nN]/) {
+        print "Please specify the website to search: ";
+        $website = <STDIN>;
+    } else { $website = 'http://www.cs.jhu.edu/~jkloss/'; }
+    chomp $website;
+    
+    open(my $fh, "perl robot.prl $website -f|");
+    print "Running robot...\n";
+
+    my $url;
+    while ($url = <$fh>) {
+        chomp $url;
+        if ($url =~ /^DONE/) { close $fh; return; }
+        if ($url =~ /^BASE/) {
+            $base_url = (substr $url, 5);
+            print "Looking at $base_url\n";
+            next;
+        }
+        # don't deal with gifs right now
+        if ($url =~ /.gif/) { next; }
+        if ($option == 1)   { &find_matches($url); }
+        else                { &magick_cmp($url);   }
+    }
+}
+
+
+# For every image URL the robot grabs, this function computes various
+# different tests to calculate the overall similarity between the
+# uploaded image and the grabbed image, outputting the result.
+sub find_matches {
+    my $url = shift;
+    try {
+        $cmp_img = Image::Magick->new();
+        $cmp_img->Read($url);
+        if (!(defined ($cmp_img->Get('format')))) { return; }
+    } catch { return; };
+
+    #############
+    # RUN TESTS #
+    #############
+    my $seg_made = 0; # variable to tell if segments have already been made
+    my $max;
+
+    # If scaling is completely off, return. 
+    my $scale = &cmp_scale();
+    if ($scale < 0.80) { return; }
+
+    # WHOLE COLOR TEST
+    # If all three channels collectively score above 2.70, with each
+    # channel giving at most a score of 1, then the image highly likely
+    # to match.
+    my ($r, $g, $b) = &cmp_color($org_img, $cmp_img);
+    if (($r + $g + $b) > 2.70) { &matched($url); return; }
+
+    # Otherwise look at segments.
+    # Make segment for the compared image, which hasn't been made yet.
+    my $ref = &segment($cmp_img);  @cmp_segments = @$ref;
+    $max = @org_segments;
+    if (@cmp_segments < @org_segments) { $max = @cmp_segments; }
+
+    # SEGMENT HUE TEST
+    # Sees if color distribution difference between each segment
+    # is consistent.
+    my ($rhue, $ghue, $bhue) = &cmp_segments2($max, 2);
+    if (($rhue + $ghue + $bhue) > 2.7) { &matched($url); return; }
+    if (($rhue + $ghue + $bhue) < 1)   { return; }
+    # If 2/3 channels score incredibly high, likely means hue adjustment,
+    # also likely to match
+    if ($rhue + $ghue > 1.8) { &matched($url); return;  }
+    if ($ghue + $bhue > 1.8) { &matched($url); return;  }
+    if ($rhue + $bhue > 1.8) { &matched($url); return;  }
+
+    # WHOLE GRAYSCALE SEGMENT B/W TEST
+    # First makes sure that grayscale matches over 60% overall, then
+    # check extreme dark/light distributions for each segment.
+    my $gray = &cmp_gray($org_img, $cmp_img);
+    if ($gray > 0.6) { 
+        my $bw   = &cmp_segments1($max, 1);
+        if ($bw > 0.75) { &matched($url); return; }
+    }
+
+}
+
+# Use Image::Magick's internal compare function.
+sub magick_cmp {
+    my $img = shift;
+    my $cmp = Image::Magick->New();
+    $cmp->Read($img);
+    my $difference = $org_img->Compare(image=>$cmp);
+    if ($difference->Get('error') < 0.25) { &matched($img); }
+}
+
+sub matched {
+    my $img = shift;
+    print "    MATCH FOUND: $img\n";
+}
+
+sub pair_sim {
+    print "Upload image 1...\n";
+    if (&upload_image(1) == 0) { return; }
+    print "Upload image 2...\n";
+    if (&upload_image(2) == 0) { return; }
+    &get_sim_scores();
+}
+
+sub pair_sim_magick {
+    print "Upload image 1...\n";
+    if (&upload_image(1) == 0) { return; }
+    print "Upload image 2...\n";
+    if (&upload_image(2) == 0) { return; }
+    my $difference = $org_img->Compare(image=>$cmp_img);
+    print "\nSimilarity is: ", 1 - $difference->Get('error'), "\n";
+    if ($difference->Get('error') < .25) { print "**IMAGES MATCH**\n"; }
+    else { print "IMAGES DO NOT MATCH\n"; }
+}
+
+sub get_sim_scores {
+    print "Calculating similarity scores between image 1 and image 2...\n\n";
+    my $scale = &cmp_scale();
+    my $match = 0;
+    print "SCALE: ", $scale, "\n";
+    print "    --CMP WHOLE COLOR TEST--\n";
+    my ($r, $g, $b) = &cmp_color($org_img, $cmp_img);
+    if (($r + $g + $b) > 2.70) { $match++; }
+    print "      Red channel = $r\n      Green channel = $g\n";
+    print "      Blue channel = $b\n";
+
+    print "    --CMP WHOLE HUE TEST--\n";
+    my ($rhue, $ghue, $bhue) = &cmp_hue($org_img, $cmp_img);
+    print "      Red channel = $rhue\n      Green channel = $ghue\n";
+    print "      Blue channel = $bhue\n";
+
+    print "    --CMP WHOLE GRAY/BW TEST--\n";
+    my $gray = &cmp_gray($org_img, $cmp_img);
+    my $bw = &cmp_bw($org_img, $cmp_img);
+    print "      Gray channel = $gray\n      BW = $bw\n";
+    my $max = @org_segments;
+    if (@cmp_segments < @org_segments) { $max = @cmp_segments; }
+
+    print "    --CMP SEGMENT COLOR TEST--\n";
+    ($r, $g, $b) = &cmp_segments2($max, 1);
+    print "      Red channel = $r\n      Green channel = $g\n";
+    print "      Blue channel = $b\n";
+
+    print "    --CMP SEGMENT HUE TEST--\n";
+    ($rhue, $ghue, $bhue) = &cmp_segments2($max, 2);
+    if (($rhue + $ghue + $bhue) > 2.7) { $match++; }
+    if ($rhue + $ghue > 1.8) { $match++; }
+    if ($ghue + $bhue > 1.8) { $match++; }
+    if ($rhue + $bhue > 1.8) { $match++; }
+    print "      Red channel = $rhue\n      Green channel = $ghue\n";
+    print "      Blue channel = $bhue\n";
+
+    print "    --CMP SEGMENT GRAY/BW TEST--\n";
+    my $bw_seg = &cmp_segments1($max, 1);
+    my $gray_seg = &cmp_segments1($max, 2);
+    print "      Gray channel = $gray_seg\n      BW = $bw_seg\n";
+
+
+    if ($gray > 0.6 && $bw_seg > 0.9) { $match++; }
+
+    if ($match > 0) { print "\n**IMAGES MATCH**\n"; }
+    else            { print "\nIMAGES DO NOT MATCH\n"; }
+}
+
+# Compares each image based on purely black/white thresholds. This test is
+# sensitive to where each individual pixel actually is.
+sub cmp_bw {
+    my $img1_hdl = shift;
+    my $img2_hdl = shift;
+    my $img1 = $img1_hdl->Clone();
+    my $img2 = $img2_hdl->Clone();
+    $img1->Quantize(colors=>2, colorspace=>'gray');
+    $img2->Quantize(colors=>2, colorspace=>'gray');
+
+    # Note offset if segments are not the same size
+    my ($x1, $y1) = $img1->Get('columns', 'rows');
+    my ($x2, $y2) = $img2->Get('columns', 'rows');
+    my $x1off = int(($x1 - $x2) / 2); my $y1off = int(($y1 - $y2) / 2);
+    my $x2off = int(($x2 - $x1) / 2); my $y2off = int(($y2 - $y1) / 2);
+    my $xmax = $x1; my $ymax = $y1;
+    if ($x1off < 0) { $x1off = 0; }
+    if ($y1off < 0) { $y1off = 0; } 
+    if ($x2off < 0) { $x2off = 0; $xmax = $x2; }
+    if ($y2off < 0) { $y2off = 0; $ymax = $y2; }
+
+    # Count the number of pixels that match exactly
+    my $pix_count = 0;
+    for (my $a = 0; $a < $xmax; $a++) {
+        for (my $b = 0; $b < $ymax; $b++) {
+            my $param1 = join '', 'pixel[', $a + $x1off, ',', $b + $y1off, ']';
+            my $param2 = join '', 'pixel[', $a + $x2off, ',', $b + $y2off, ']';
+            if ($img1->Get($param1) eq $img2->get($param2)) {
+                $pix_count++;
+            }
+        }
+    }
+    return ($pix_count / ($xmax * $ymax));
+}
+
+# Runs each test based on segments, averaged over each segment.
+# Type 1 = b/w test
+# Type 2 = grayscale test
+sub cmp_segments1 {
+    my $max = shift;
+    my $type = shift;
+    my $tot_count = 0;
+    for (my $i = 0; $i < $max; $i++) {
+        if ($type == 1) {
+            $tot_count += &cmp_bw($org_segments[$i], $cmp_segments[$i]);
+        } else {
+            $tot_count += &cmp_gray($org_segments[$i], $cmp_segments[$i]);
+        }
+    }
+    return $tot_count / $max;
+}
+
+# Compares the overall grayscale distribution.
+sub cmp_gray {
+    my $img1_hdl = shift;
+    my $img2_hdl = shift;
+    my $img1 = $img1_hdl->Clone();
+    my $img2 = $img2_hdl->Clone();
+    $img1->Quantize(colorspace=>'gray');
+    $img2->Quantize(colorspace=>'gray');
+    my $img1_hash = &make_gray_hist($img1);
+    my $img2_hash = &make_gray_hist($img2);
+    return &cosine_sim($img1_hash, $img2_hash);
+}
+
+# Compare the overall color distribution, based on the three RGB channels,
+# therefore returning three different similarity results.
+sub cmp_color {
+    my $img1_hdl = shift;
+    my $img2_hdl = shift;
+    my $red = 0; my $green = 0; my $blue = 0;
+    my $img1 = $img1_hdl->Clone();
+    my $img2 = $img2_hdl->Clone();
+    my @img1_array = &make_color_hist($img1);
+    my @img2_array = &make_color_hist($img2);
+
+    $red   = &cosine_sim($img1_array[0], $img2_array[0]);
+    $green = &cosine_sim($img1_array[1], $img2_array[1]);
+    $blue  = &cosine_sim($img1_array[2], $img2_array[2]);
+    return ($red, $green, $blue);
+}
+
+# Compare color distribution for each segment.
+# Type 1 = color test
+# Type 2 = hue test
+sub cmp_segments2 {
+    my $max = shift;
+    my $type = shift;
+    my $red_tot = 0;
+    my $green_tot = 0;
+    my $blue_tot = 0;
+    for (my $i = 0; $i < $max; $i++) {
+        if ($type == 1) {
+            my ($red, $green, $blue) = &cmp_color($org_segments[$i],
+                $cmp_segments[$i]);
+            $red_tot += $red; $green_tot += $green; $blue_tot += $blue;
+        } else {
+            my ($red, $green, $blue) = &cmp_hue($org_segments[$i],
+                $cmp_segments[$i]);
+            $red_tot += $red; $green_tot += $green; $blue_tot += $blue;
+        }
+    }
+    return ($red_tot / $max, $green_tot / $max, $blue_tot / $max);
+}
+
+sub cmp_hue {
+    my $img1_hdl = shift;
+    my $img2_hdl = shift;
+    my $img1 = $img1_hdl->Clone();
+    my $img2 = $img2_hdl->Clone();
+    my @img1_arr = &make_color_hist($img1);
+    my @img2_arr = &make_color_hist($img2);
+    my $red = 0; my $green = 0; my $blue = 0;
+    
+    for (my $i = 0; $i < 3; $i++) {
+        my @differences = ( ); # empty array
+        my %c1 = %{$img1_arr[$i]}; my %c2 = %{$img2_arr[$i]};
+        my $size1 = (keys %c1); my $size2 = (keys %c2);
+        # if number of colors is too different, not worth comparing
+        if (abs($size1 - $size2) > 50) { next; }
+        # base off the smaller hash
+        if ($size2 < $size1) { my %temp = %c1; %c1 = %c2; %c2 = %temp; }
+
+        foreach my $val (sort {$a <=> $b} values %c1) {
+            push @differences, $val;
+        }
+        my $count = 0; my $tot = 0;
+        foreach my $val (sort {$a <=> $b} values %c2) {
+            if ($count >= @differences) { next; }
+            $differences[$count] = abs($differences[$count] - $val);
+            $tot += $differences[$count];
+            $count++;
+        }
+        my $match = 0;
+        for (my $j = 0; $j < @differences; $j++) {
+            if ($differences[$j] < .01) { $match++; }
+        }
+        if ($count == 0) { next; }
+        if    ($i == 0) { $red   = $match / $count; } 
+        elsif ($i == 1) { $green = $match / $count; }
+        else            { $blue  = $match / $count; }
+    }
+    return ($red, $green, $blue);
+}
+
+# Computes scale (width/height) for each image, and compares
+# the two, returning the similarity.
+sub cmp_scale {
+    my ($x1, $y1) = $org_img->Get('columns', 'rows');
+    my ($x2, $y2) = $cmp_img->Get('columns', 'rows');
+    if (!defined($x2) or !defined($y2)) { return -1; }
+    if ($x2 < 0 or $y2 < 0) { return -1; }
+
+    my $scale1 = $x1/$y1;
+    my $scale2 = $x2/$y2;
+
+    if ($scale1 < $scale2) { return $scale1 / $scale2;}
+    return $scale2 / $scale1;
+}
+
+# Makes an array with 3 hashes in it, each corresponding to a
+# histogram of data values for each color channel.
+sub make_color_hist {
+    my $img = shift;  # image segment being analyzed
+    my %red;          # red channel
+    my %green;        # green channel
+    my %blue;         # blue channel
+
+    # iterate through every pixel
+    my ($x, $y) = $img->Get('columns', 'rows');
+    for (my $i = 0; $i < $x; $i++) {
+        for (my $j = 0; $j < $y; $j++) {
+            my $param = join '', 'pixel[', $i, ',', $j, ']';
+            # get color string and split into RGB channels, reducing back to 8-bit
+            my $color_string = $img->Get($param);
+            # ignore invalid color
+            if ($color_string eq '65535,65535,65535,65535') {
+                next;
+            }
+            my @values = split(',', $color_string);
+            # reduce to 8-bit
+            for (my $a = 0; $a < 3; $a++) {
+                $values[$a] = $values[$a] & 255;
+            }
+
+            # store RGB values
+            if (exists $red{$values[1]})   { $red{$values[0]}++;   }
+            else                           { $red{$values[0]} = 1; }
+            if (exists $green{$values[2]}) { $green{$values[1]}++;   }
+            else                           { $green{$values[1]} = 1; }
+            if (exists $blue{$values[3]})  { $blue{$values[2]}++;   }
+            else                           { $blue{$values[2]} = 1; }
+        }
+    }
+
+    my @colors = (\%red, \%green, \%blue);
+    # normalize pixel counts by dividing it by total number of pixels, i.e
+    # getting relative distributions of each color
+    my $tot = $x * $y;
+    foreach my $color (@colors) {
+        while (my ($key, $val) = each %{$color}) {
+            $color->{$key} = $val / $tot;
+        }
+    }
+    return @colors;
+}
+
+# Very similar to make_color_hist, but only focuses on one channel since
+# grayscale means all three channels hold the same value.
+sub make_gray_hist {
+    my $img = shift;
+    my %gray;
+    my ($x, $y) = $img->Get('columns', 'rows');
+    for (my $i = 0; $i < $x; $i++) {
+        for (my $j = 0; $j < $y; $j++) {
+            my $param = join '', 'pixel[', $i, ',', $j, ']';
+            my $color_string = $img->Get($param);
+            if ($color_string eq '65535,65535,65535,65535') {
+                next;
+            }
+            my @values = split(',', $color_string);
+            # since grayscale means all channels are the same, we
+            # only really need to look at one channel
+            $values[0] = $values[0] & 255;
+            if (exists $gray{$values[1]})   { $gray{$values[0]}++;   }
+            else                            { $gray{$values[0]} = 1; }
+        }
+    }
+    # normalize values
+    my $tot = $x * $y;
+    while (my ($key, $val) = each %gray) {
+            $gray{$key} = $val / $tot;
+    }
+    return \%gray;
+}
+
+# Splices the image into various segments. If it does not divide
+# evenly, the edge tiles will have different dimensions.
+sub segment {
+    my $img = shift;       # Image::Magick handle for the image
+    my @vec = ( );
+
+    # get dimensions for split, currently 5x5, i.e. 25 segments
+    my $rows = 5;
+    my $columns = 5;
+    my ($width, $height) = $img->Get('columns', 'rows');
+    my $xtile = int($width / $columns); my $ytile = int($height / $rows);
+
+    my $count = 0;
+    for (my $i = 0; $i < $width; $i += $xtile) {
+        for (my $j = 0; $j < $height; $j += $ytile) {
+            my $segment = $img->Clone();
+            my $geometry = join '', $xtile, 'x', $ytile, '+', $i, '+', $j;
+            $segment->Crop(geometry=>$geometry);
+            # store segments into vector
+            my ($segwidth, $segheight) = $segment->Get('columns', 'rows');
+            if (($segwidth > 0) and ($segheight > 0)) {
+                push @vec, $segment;
+            }
+        }
+    }
+    return \@vec;
+}
+
+
+# Calculates cosine similarity for histograms. 
+sub cosine_sim {
+    my $vec1 = shift;
+    my $vec2 = shift;
+
+    my $num = 0;
+    my $sum_sq1 = 0;
+    my $sum_sq2 = 0;
+
+    my @val1 = values %{ $vec1 };
+    my @val2 = values %{ $vec2 };
+    if ((scalar @val1) > (scalar @val2)) {
+    my $tmp  = $vec1;
+       $vec1 = $vec2;
+       $vec2 = $tmp;
+    }
+
+    my $key = undef;
+    my $val = undef;
+
+    while (($key, $val) = each %{ $vec1 }) {
+       $num += $val * ($$vec2{ $key } || 0);
+    }
+
+    # calculate the sum of squares
+    while (($key, $val) = each (%{$vec1})) {
+            $sum_sq1 += $val * $val;
+    }
+    while (($key, $val) = each (%{$vec2})) {
+            $sum_sq2 += $val * $val;
+    }
+    if (sqrt($sum_sq1 * $sum_sq2) == 0) { return 0; }
+
+    return ( $num / sqrt( $sum_sq1 * $sum_sq2 ));
+}
