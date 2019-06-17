@@ -1,31 +1,14 @@
-Emily Cheng echeng6@jhu,edu
-cs466 Information Retrieval and Web Agents, Spring 2016
-Final Project
+# Image Comparison Vector Model
+Final project for the course cs466 Information Retrieval and Web Agents, Spring 2017. 
 
-In this class we have learned different types of information retrieval and
-language processing from four previous projects:
+To run, simply call `perl main.prl`
 
-    Assignment 1: End-of-Sentence Detection and Text Segment Classification
-    Assignment 2: Vector Models of Information Retrieval (Search Engine)
-    Assignment 3: Lexical Ambiguity Resolution
-    Assignment 4: Web Robots
+This goal of this project was to present a potential solution to the issue of art-theft on the internet, which discourages many artists from posting their work online. Ideally to be used by art-hosting sites such as DeviantArt, Pixiv, and Flickr, this program would be able to automatically detect if the image had already been uploaded elsewhere by using image-similarity algorithms.
 
-My final project aims to take everything we've learned from these projects, but
-apply it to color processing in images. Color can simply be considered another 
-language; where we are used to looking at words and their context in the
-sentence or phrase as an indicator for their significance, I looked at each
-pixel's RBG values, which are specific to each color, and used that to begin
-implementing the vector model.
+# About
 
-This program essentially takes a user-supplied image, and runs various similarity
-tests to either another user-supplied image, or through images found on the
-web. Utilizing the second option places a web robot on a specified or default
-website, and the robot will subsequently crawl and grab any images it finds
-from thereon. The program will then report whether two images match or not. For
-data collection, it can also run and output the results of the similarity tests
-themselves.
+This is a rather old project of mine I completed my sophomore spring of undergrad. It was a new experience in a lot of aspects; my first upper level course, my first experience with Perl, and my first time learning about and using vector models. Furthermore, I was basically going into the world of image processing completely blind. As such, the overall quality of this code isn't exactly great. However, it was the first, large-scale personal project of my own design, and I came away learning a lot from it.
 
-While this project itself is small-scaled, the big-picture aim for this project
-was to present a potential solution to the enormous art-theft problem that runs
-rampant on the Internet. More information of this project as a whole, and the
-process, can be read in the writeup.pdf provided. 
+I wanted this project to take everything I had learned during the course, which focused on vector models with text-based input, and apply it to images, where color was used as the input information. This project would ultimately prove to be my first, hands-on encounter on the difficulties of image processing; in particular, how computationally intensive image processing actually is, and how the slightest change in RGB values can drastically change similarity calculations.
+
+Read about the project in-depth in my [final report](https://github.com/zorulo/Image-Comparison-Vector-Model/blob/master/writeup.pdf).
