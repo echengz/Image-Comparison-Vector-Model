@@ -1,5 +1,5 @@
 # Image Comparison Vector Model
-Final project for the course cs466 Information Retrieval and Web Agents, Spring 2017. 
+Main bulk of my final project for the course Information Retrieval and Web Agents. Testing images and scripts are omitted, but the results are summarized in [results.pdf](https://github.com/zorulo/Image-Comparison-Vector-Model/blob/master/results.pdf).
 
 To run, simply call `perl main.prl`
 
